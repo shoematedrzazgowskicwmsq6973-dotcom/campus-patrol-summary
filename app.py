@@ -92,6 +92,17 @@ class PatrolApp:
                     padx=(0, 0) if stacked else (16, 0), pady=(8, 0) if stacked else (0, 0))
 
         options.bind("<Configure>", fit_toolbar)
+        destination = ttk.Frame(options, padding=(0, 10, 0, 0))
+        destination.grid(row=2, column=0, columnspan=2, sticky="ew")
+        destination.columnconfigure(1, weight=1)
+        ttk.Label(destination, text="保存位置").grid(row=0, column=0, padx=(0, 8))
+        self.output_directory = tk.StringVar()
+        self.output_directory_entry = ttk.Entry(destination, textvariable=self.output_directory,
+                                                state="readonly", width=1)
+        self.output_directory_entry.grid(row=0, column=1, sticky="ew")
+        self.folder_button = ttk.Button(destination, text="选择文件夹…", command=self.choose_output_directory)
+        self.folder_button.grid(row=0, column=2, padx=(8, 0))
+        self.controls.append(self.folder_button)
         self.duplicate_notice = tk.StringVar()
         self.duplicate_label = ttk.Label(body, textvariable=self.duplicate_notice,
             foreground="#8a3d13", wraplength=900, padding=(0, 0, 0, 10))
@@ -178,7 +189,7 @@ class PatrolApp:
             names.trace_add("write", lambda *_args, i=index: self.invalidate(i))
         bottom = ttk.Frame(body, padding=(0, 15, 0, 0))
         bottom.grid(row=6, column=0, sticky="ew")
-        self.status = tk.StringVar(value="请选择周一到周日各一张截图。")
+        self.status = tk.StringVar(value="请选择周一到周日各一张截图。保存位置可提前选择，也可在导出时选择。")
         ttk.Label(bottom, textvariable=self.status, wraplength=780).pack(side="left", anchor="w")
         ttk.Label(body, text="模板：随程序附带的原始模板　|　模板及原截图不会被修改　|　生僻字请逐一核对",
                   style="Small.TLabel", padding=(0, 10, 0, 0)).grid(row=7, column=0, sticky="w")
@@ -372,6 +383,19 @@ class PatrolApp:
         ttk.Button(right, text="从上面的原文提取部门和姓名", command=apply).pack(anchor="w")
         ttk.Button(right, text="关闭", command=win.destroy).pack(anchor="w", pady=(8, 0))
 
+    def choose_output_directory(self):
+        if self.busy:
+            return
+        current = self.output_directory.get()
+        options = dict(parent=self.root, title="选择 Word 保存文件夹", mustexist=True)
+        if current and Path(current).is_dir():
+            options["initialdir"] = current
+        path = filedialog.askdirectory(**options)
+        if path:
+            self.output_directory.set(str(Path(path)))
+            self.output_directory_entry.xview_moveto(1)
+            self.status.set("已选择保存位置。导出时会按学年、学期、周次自动命名；同名文件会先询问。")
+
     def export(self):
         if self.busy:
             return
@@ -390,17 +414,34 @@ class PatrolApp:
                     + "\n\n请核对日期、截图和部门填写。确认信息无误，仍要继续导出吗？",
                     icon="warning", default=messagebox.NO, parent=self.root):
                 return
-            path = filedialog.asksaveasfilename(parent=self.root, title="导出巡查汇总 Word",
-                defaultextension=".docx", filetypes=[("Word 文档", "*.docx")],
-                initialfile=filename)
-            if not path:
-                return
-            # The Windows save dialog handles the explicit overwrite question.
-            self.last_output = build_docx(records, Path(path), overwrite=True)
+            directory = self.output_directory.get()
+            overwrite = False
+            if directory:
+                folder = Path(directory)
+                if not folder.is_dir():
+                    raise ValueError("保存文件夹已不存在或无法访问，请点击“选择文件夹”重新选择。")
+                path = folder / filename
+                if path.exists():
+                    if not messagebox.askyesno("同名文件已存在", f"已存在：\n{path}\n\n是否覆盖？选择“否”可更换保存文件夹或周次。",
+                            icon="warning", default=messagebox.NO, parent=self.root):
+                        return
+                    overwrite = True
+            else:
+                selected = filedialog.asksaveasfilename(parent=self.root, title="导出巡查汇总 Word",
+                    defaultextension=".docx", filetypes=[("Word 文档", "*.docx")],
+                    initialfile=filename)
+                if not selected:
+                    return
+                path = Path(selected)
+                # The native Save As dialog already asks before replacing a file.
+                overwrite = True
+            self.last_output = build_docx(records, path, overwrite=overwrite)
+            self.output_directory.set(str(self.last_output.parent))
+            self.output_directory_entry.xview_moveto(1)
             self.status.set(f"已导出：{self.last_output.name}")
             messagebox.showinfo("导出完成", f"已保存到：\n{self.last_output}\n\n请用 Word 打开，最后检查分页、图片和姓名。", parent=self.root)
         except PermissionError:
-            messagebox.showerror("无法保存", "文件可能正在 Word 中打开。请关闭该文件，或换一个文件名。", parent=self.root)
+            messagebox.showerror("无法保存", "文件可能正在 Word 中打开，或当前文件夹没有写入权限。请关闭文件，或点击“选择文件夹”更换保存位置。", parent=self.root)
         except Exception as exc:
             messagebox.showerror("未能导出", str(exc), parent=self.root)
 

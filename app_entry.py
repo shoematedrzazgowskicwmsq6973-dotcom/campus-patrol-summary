@@ -68,7 +68,25 @@ def self_test(result_path):
         with Image.open(fixture) as image:
             image.save(jpeg, format="JPEG", quality=95)
         records = [DayRecord(fixture if i % 2 == 0 else jpeg, f"测试部门{i}", "张三 李四", True) for i in range(7)]
-        report = build_docx(records, result_path.parent / "synthetic-test-report.docx", overwrite=True)
+        for row, record in zip(app.rows, records):
+            row["image"] = record.image
+            row["department"].set(record.department)
+            row["names"].set(record.names)
+            row["checked"].set(True)
+        app.start_year.set("2027")
+        app.end_year.set("2028")
+        app.semester.set("第二学期")
+        app.week.set("7")
+        folder = result_path.parent / "Word 保存位置"
+        folder.mkdir(exist_ok=True)
+        with patch("app.filedialog.askdirectory", return_value=str(folder)):
+            app.folder_button.invoke()
+        with patch("app.filedialog.asksaveasfilename") as save_dialog, patch("app.messagebox.showinfo"), patch("app.messagebox.askyesno", return_value=True), patch("app.messagebox.showerror") as error:
+            app.export()
+        error.assert_not_called()
+        save_dialog.assert_not_called()
+        report = folder / filename
+        assert report.is_file() and app.last_output == report.resolve()
         with ZipFile(report) as archive:
             assert len([n for n in archive.namelist() if n.startswith("word/media/")]) == 7
             for index, record in enumerate(records, 1):
@@ -82,6 +100,7 @@ def self_test(result_path):
             "preview_switching": True, "duplicate_warning": True,
             "export_seven_images": True, "filename_example": filename,
             "original_bytes_preserved": True, "word_auto_compression_disabled": True,
+            "selected_output_directory": True,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
     finally:
         if app.busy:

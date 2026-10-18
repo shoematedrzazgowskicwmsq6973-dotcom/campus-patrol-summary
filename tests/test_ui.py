@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image
 from app import PatrolApp
-from patrol_core import Fields
+from patrol_core import Fields, report_filename
 
 
 class DesktopTests(unittest.TestCase):
@@ -25,6 +25,84 @@ class DesktopTests(unittest.TestCase):
     def select(self, index):
         with patch("app.filedialog.askopenfilename", return_value=str(self.image)):
             self.app.choose_image(index)
+
+    def prepare_export(self):
+        self.app.week.set("7")
+        for index, row in enumerate(self.app.rows):
+            row["image"] = self.image
+            row["department"].set(f"测试部门{index}")
+            row["names"].set("测试甲 测试乙")
+            row["checked"].set(True)
+
+    def expected_output(self, folder):
+        return folder / report_filename("2026", "2027", "第一学期", "7")
+
+    def test_folder_picker_and_direct_export_to_chinese_path(self):
+        self.prepare_export()
+        folder = Path(self.directory.name) / "巡查 文档"
+        folder.mkdir()
+        with patch("app.filedialog.askdirectory", return_value=str(folder)) as picker:
+            self.app.folder_button.invoke()
+        self.assertEqual(self.app.output_directory.get(), str(folder))
+        self.assertTrue(picker.call_args.kwargs["mustexist"])
+        with patch("app.filedialog.asksaveasfilename") as save, patch("app.messagebox.showinfo"), patch("app.messagebox.showerror") as error:
+            self.app.export()
+        save.assert_not_called()
+        error.assert_not_called()
+        self.assertEqual(self.app.last_output, self.expected_output(folder).resolve())
+        self.assertTrue(self.app.last_output.is_file())
+
+    def test_cancel_folder_picker_preserves_choice_and_busy_prevents_picker(self):
+        folder = Path(self.directory.name)
+        self.app.output_directory.set(str(folder))
+        with patch("app.filedialog.askdirectory", return_value="") as picker:
+            self.app.choose_output_directory()
+        self.assertEqual(picker.call_args.kwargs["initialdir"], str(folder))
+        self.assertEqual(self.app.output_directory.get(), str(folder))
+        self.app.set_busy(True)
+        self.assertEqual(str(self.app.folder_button.cget("state")), "disabled")
+        with patch("app.filedialog.askdirectory") as picker:
+            self.app.choose_output_directory()
+        picker.assert_not_called()
+        self.app.set_busy(False)
+        self.assertEqual(str(self.app.output_directory_entry.cget("state")), "readonly")
+
+    def test_missing_folder_stops_export_and_keeps_reviewed_data(self):
+        self.prepare_export()
+        folder = Path(self.directory.name) / "已移除"
+        self.app.output_directory.set(str(folder))
+        with patch("app.messagebox.showerror") as error, patch("app.filedialog.asksaveasfilename") as save:
+            self.app.export()
+        self.assertIn("重新选择", error.call_args.args[1])
+        save.assert_not_called()
+        self.assertFalse(folder.exists())
+        self.assertIsNone(self.app.last_output)
+        self.assertTrue(all(row["checked"].get() for row in self.app.rows))
+
+    def test_existing_report_requires_confirmation_and_cancel_preserves_file(self):
+        self.prepare_export()
+        folder = Path(self.directory.name)
+        self.app.output_directory.set(str(folder))
+        target = self.expected_output(folder)
+        target.write_bytes(b"existing report")
+        with patch("app.messagebox.askyesno", return_value=False) as confirm, patch("app.messagebox.showinfo") as info:
+            self.app.export()
+        self.assertEqual(confirm.call_args.kwargs["default"], "no")
+        self.assertIn(str(target), confirm.call_args.args[1])
+        self.assertEqual(target.read_bytes(), b"existing report")
+        info.assert_not_called()
+        with patch("app.messagebox.askyesno", return_value=True), patch("app.messagebox.showinfo"), patch("app.messagebox.showerror") as error:
+            self.app.export()
+        error.assert_not_called()
+        self.assertTrue(target.read_bytes().startswith(b"PK"))
+
+    def test_cancel_save_as_creates_nothing_and_does_not_select_folder(self):
+        self.prepare_export()
+        with patch("app.filedialog.asksaveasfilename", return_value=""), patch("app.messagebox.showinfo") as info:
+            self.app.export()
+        self.assertEqual(self.app.output_directory.get(), "")
+        self.assertIsNone(self.app.last_output)
+        info.assert_not_called()
 
     def test_edit_and_image_change_invalidate_review(self):
         self.select(0)
@@ -71,6 +149,7 @@ class DesktopTests(unittest.TestCase):
             self.app.export()
         self.assertTrue(target.is_file())
         self.assertTrue(info.called)
+        self.assertEqual(self.app.output_directory.get(), str(target.parent.resolve()))
         self.assertEqual(dialog.call_args.kwargs["initialfile"],
                          "广东工业大学2028-2029学年第二学期第七周公共区域巡查汇总.docx")
 
