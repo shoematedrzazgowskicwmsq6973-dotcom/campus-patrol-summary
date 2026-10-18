@@ -100,7 +100,7 @@ class DocumentTests(unittest.TestCase):
         with ZipFile(TEMPLATE) as source, ZipFile(target) as output:
             source_data = {name: source.read(name) for name in source.namelist()}
             output_data = {name: output.read(name) for name in output.namelist()}
-        changed = {"word/document.xml", "word/_rels/document.xml.rels", "[Content_Types].xml"}
+        changed = {"word/document.xml", "word/_rels/document.xml.rels", "[Content_Types].xml", "word/settings.xml"}
         for name in source_data:
             if name not in changed and not name.startswith("word/media/"):
                 self.assertEqual(source_data[name], output_data[name], name)
@@ -124,10 +124,52 @@ class DocumentTests(unittest.TestCase):
                 with Image.open(BytesIO(output_data[f"word/media/patrol_day{i}.png"])) as embedded:
                     self.assertEqual(image.size, embedded.size)
                     self.assertEqual(image.tobytes(), embedded.tobytes())
+            self.assertEqual(output_data[f"word/media/patrol_day{i}.png"], record.image.read_bytes())
         self.assertNotIn("Text", "".join(root.xpath("//w:t/text()", namespaces=NS)))
         ids = root.xpath("//wp:docPr/@id", namespaces=NS)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(hashlib.sha256(TEMPLATE.read_bytes()).hexdigest(), self.template_hash)
+
+    def test_original_bytes_for_mixed_formats_and_no_word_compression(self):
+        from PIL.PngImagePlugin import PngInfo
+        formats = [("PNG", "png"), ("JPEG", "jpeg"), ("BMP", "bmp"), ("GIF", "gif"),
+                   ("TIFF", "tiff"), ("PNG", "png"), ("JPEG", "jpeg")]
+        inputs = {}
+        for index, (image_format, extension) in enumerate(formats):
+            path = self.folder / f"original-{index}.{extension}"
+            image = Image.new("RGBA" if index == 5 else "RGB", (1080, 2340), (20, 80, 140, 64) if index == 5 else (20, 80, 140))
+            options = {}
+            if image_format == "PNG":
+                metadata = PngInfo()
+                metadata.add_text("Description", "Synthetic original image metadata")
+                options.update(pnginfo=metadata, dpi=(137, 137))
+            if image_format == "JPEG":
+                options.update(quality=93, dpi=(300, 300), comment=b"Synthetic original JPEG")
+            image.save(path, format=image_format, **options)
+            inputs[index + 1] = (path.read_bytes(), extension)
+            self.records[index].image = path
+        target = build_docx(self.records, self.folder / "original-images.docx")
+        with ZipFile(target) as archive:
+            for day, (payload, extension) in inputs.items():
+                embedded = archive.read(f"word/media/patrol_day{day}.{extension}")
+                self.assertEqual(hashlib.sha256(embedded).digest(), hashlib.sha256(payload).digest())
+                self.assertEqual(embedded, payload)
+                self.assertEqual(self.records[day - 1].image.read_bytes(), payload)
+            settings = ET.fromstring(archive.read("word/settings.xml"))
+            self.assertEqual(settings.find("w:doNotAutoCompressPictures", NS).get(f"{{{NS['w']}}}val"), "true")
+            doc = ET.fromstring(archive.read("word/document.xml"))
+            self.assertEqual(doc.xpath("//a:blip/@cstate", namespaces=NS), ["none"] * 7)
+
+    def test_unsupported_format_is_not_silently_converted(self):
+        path = self.folder / "original.webp"
+        Image.new("RGB", (300, 600), "white").save(path, format="WEBP")
+        original = path.read_bytes()
+        self.records[0].image = path
+        output = self.folder / "should-not-exist.docx"
+        with self.assertRaisesRegex(ValueError, "原样保留"):
+            build_docx(self.records, output)
+        self.assertFalse(output.exists())
+        self.assertEqual(path.read_bytes(), original)
 
     def test_refuse_incomplete_or_unreviewed(self):
         target = self.folder / "result.docx"

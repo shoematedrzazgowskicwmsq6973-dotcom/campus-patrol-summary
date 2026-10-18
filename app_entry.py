@@ -12,13 +12,15 @@ def self_test(result_path):
     import tkinter as tk
     from unittest.mock import patch
     from zipfile import ZipFile
+    from PIL import Image
+    from lxml import etree as ET
     import rapidocr
     import onnxruntime
     import numpy
     import PIL
     import lxml
     from app import PatrolApp
-    from patrol_core import BASE, TEMPLATE, LocalOCR, DayRecord, build_docx, report_filename
+    from patrol_core import BASE, NS, TEMPLATE, LocalOCR, DayRecord, build_docx, report_filename
 
     def deny_network(*args, **kwargs):
         raise RuntimeError("Network disabled during offline release diagnostic")
@@ -62,15 +64,24 @@ def self_test(result_path):
         app.day_selectors[0].invoke()
         assert app.screenshot_preview.picture is not None
         filename = report_filename("2027", "2028", "第二学期", "7")
-        records = [DayRecord(fixture, f"测试部门{i}", "张三 李四", True) for i in range(7)]
+        jpeg = result_path.parent / "synthetic-input.jpeg"
+        with Image.open(fixture) as image:
+            image.save(jpeg, format="JPEG", quality=95)
+        records = [DayRecord(fixture if i % 2 == 0 else jpeg, f"测试部门{i}", "张三 李四", True) for i in range(7)]
         report = build_docx(records, result_path.parent / "synthetic-test-report.docx", overwrite=True)
         with ZipFile(report) as archive:
             assert len([n for n in archive.namelist() if n.startswith("word/media/")]) == 7
+            for index, record in enumerate(records, 1):
+                extension = "png" if index % 2 == 1 else "jpeg"
+                assert archive.read(f"word/media/patrol_day{index}.{extension}") == record.image.read_bytes()
+            settings = ET.fromstring(archive.read("word/settings.xml"))
+            assert settings.find("w:doNotAutoCompressPictures", NS).get(f"{{{NS['w']}}}val") == "true"
         result_path.write_text(json.dumps({
             "ok": True, "packaged": frozen, "network_disabled": True,
             "ocr_department": "校团委测试部", "ocr_names": "张三 李四",
             "preview_switching": True, "duplicate_warning": True,
             "export_seven_images": True, "filename_example": filename,
+            "original_bytes_preserved": True, "word_auto_compression_disabled": True,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
     finally:
         if app.busy:

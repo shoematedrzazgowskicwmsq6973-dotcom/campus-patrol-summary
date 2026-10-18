@@ -27,6 +27,11 @@ XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 DEPT = re.compile(r"部\s*门\s*[:：]")
 NAME = re.compile(r"姓\s*名\s*[:：]")
 STOP = re.compile(r"(?:开始\s*[-—－~～至到]?\s*结束\s*时间|开始时间|结束时间|巡查范围|巡查情况|巡查时间|日期)\s*[:：]?")
+WORD_IMAGE_FORMATS = {
+    "PNG": ("png", "image/png"), "JPEG": ("jpeg", "image/jpeg"),
+    "BMP": ("bmp", "image/bmp"), "GIF": ("gif", "image/gif"),
+    "TIFF": ("tiff", "image/tiff"),
+}
 
 
 @dataclass
@@ -189,6 +194,18 @@ def _text(cell, value: str):
         node.text = ""
 
 
+def original_image_payload(path: Path):
+    """Read image dimensions but embed the exact source file, without re-encoding."""
+    payload = Path(path).read_bytes()
+    with Image.open(BytesIO(payload)) as source:
+        if source.format not in WORD_IMAGE_FORMATS:
+            raise ValueError("为原样保留图片，Word 导出支持 PNG、JPG、BMP、GIF、TIFF。请使用原始 PNG/JPG 截图，不会自动转换或压缩。")
+        extension, content_type = WORD_IMAGE_FORMATS[source.format]
+        width, height = source.size
+        source.verify()
+    return payload, extension, content_type, width, height
+
+
 def build_docx(records: list[DayRecord], output: Path, template: Path = TEMPLATE, *, overwrite: bool = False) -> Path:
     """Change seven text cells and seven images, preserving all other parts."""
     output, template = Path(output).resolve(), Path(template).resolve()
@@ -214,6 +231,7 @@ def build_docx(records: list[DayRecord], output: Path, template: Path = TEMPLATE
     root = _xml(data["word/document.xml"])
     rels = _xml(data["word/_rels/document.xml.rels"])
     types = _xml(data["[Content_Types].xml"])
+    settings = _xml(data["word/settings.xml"])
     tables = root.xpath("/w:document/w:body/w:tbl", namespaces=NS)
     matches = [t for t in tables if t.xpath("./w:tr[1]/w:tc//w:t/text()", namespaces=NS) == ["时间", *DAYS]]
     if len(matches) != 1:
@@ -267,14 +285,16 @@ def build_docx(records: list[DayRecord], output: Path, template: Path = TEMPLATE
         else:
             raise ValueError(f"模板{DAYS[index - 1]}的位置含多张图片，无法安全替换")
 
-        with Image.open(record.image) as source:
-            image = ImageOps.exif_transpose(source).convert("RGB")
-            buffer = BytesIO()
-            image.save(buffer, format="PNG")
-            width, height = image.size
-        name = f"word/media/patrol_day{index}.png"
-        added[name] = buffer.getvalue()
+        payload, extension, content_type, width, height = original_image_payload(record.image)
+        name = f"word/media/patrol_day{index}.{extension}"
+        added[name] = payload
         rel.set("Target", name.removeprefix("word/"))
+        drawing.find(".//a:blip", NS).set("cstate", "none")
+        existing_type = next((node for node in types if node.get("Extension", "").lower() == extension), None)
+        if existing_type is None:
+            ET.SubElement(types, f"{{{NS['ct']}}}Default", Extension=extension, ContentType=content_type)
+        elif existing_type.get("ContentType") != content_type:
+            raise ValueError("模板的图片格式声明不匹配，请使用随程序附带的模板")
         scale = min(max_w / width, max_h / height)
         cx, cy = round(width * scale), round(height * scale)
         extent = drawing.find(".//wp:extent", NS)
@@ -285,8 +305,19 @@ def build_docx(records: list[DayRecord], output: Path, template: Path = TEMPLATE
         docpr.set("id", str(max_id + index))
         docpr.set("name", f"{DAYS[index - 1]}巡查截图")
 
-    if not any(n.get("Extension", "").lower() == "png" for n in types):
-        ET.SubElement(types, f"{{{NS['ct']}}}Default", Extension="png", ContentType="image/png")
+    # Request that Word preserve original image data when the document is saved.
+    # Insert in CT_Settings schema order, before the late settings extension group.
+    no_compression = settings.find("w:doNotAutoCompressPictures", NS)
+    if no_compression is None:
+        no_compression = ET.Element(f"{{{NS['w']}}}doNotAutoCompressPictures")
+        late_settings = {"forceUpgrade", "captions", "readModeInkLockDown", "smartTagType",
+                         "schemaLibrary", "shapeDefaults", "doNotEmbedSmartTags", "decimalSymbol", "listSeparator"}
+        following = next((node for node in settings if ET.QName(node).localname in late_settings), None)
+        if following is not None:
+            following.addprevious(no_compression)
+        else:
+            settings.append(no_compression)
+    no_compression.set(f"{{{NS['w']}}}val", "true")
     # Remove replaced examples, including hidden unused screenshot bytes. Keep
     # an old part only if another package relationship still refers to it.
     still_used = {"word/" + n.get("Target", "") for n in rels}
@@ -306,6 +337,7 @@ def build_docx(records: list[DayRecord], output: Path, template: Path = TEMPLATE
     data["word/document.xml"] = _serialized(root)
     data["word/_rels/document.xml.rels"] = _serialized(rels)
     data["[Content_Types].xml"] = _serialized(types)
+    data["word/settings.xml"] = _serialized(settings)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:

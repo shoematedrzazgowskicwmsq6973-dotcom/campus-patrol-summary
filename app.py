@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
-from patrol_core import BASE, DAYS, TEMPLATE, DayRecord, LocalOCR, build_docx, find_duplicate_departments, parse_fields, report_filename
+from patrol_core import BASE, DAYS, TEMPLATE, WORD_IMAGE_FORMATS, DayRecord, LocalOCR, build_docx, find_duplicate_departments, parse_fields, report_filename
 from screenshot_preview import ScreenshotPreview
 
 
@@ -240,11 +240,14 @@ class PatrolApp:
             return
         self.select_day(index)
         path = filedialog.askopenfilename(parent=self.root, title=f"选择{DAYS[index]}的微信截图",
-                   filetypes=[("截图", "*.png *.jpg *.jpeg *.bmp *.webp"), ("所有文件", "*.*")])
+                   filetypes=[("截图（原图嵌入 Word）", "*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff"), ("所有文件", "*.*")])
         if not path:
             return
         try:
             with Image.open(path) as image:
+                if image.format not in WORD_IMAGE_FORMATS:
+                    messagebox.showerror("此格式无法原样写入 Word", "请选择原始 PNG/JPG 截图，或 BMP、GIF、TIFF 图片。程序不会为了导出而转换、压缩原图。", parent=self.root)
+                    return
                 image.verify()
         except Exception:
             messagebox.showerror("图片无法读取", "请选择正常的 PNG、JPG 或其他常用图片。", parent=self.root)
